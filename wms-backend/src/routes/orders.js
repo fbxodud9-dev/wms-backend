@@ -161,6 +161,32 @@ router.post("/:id/allocate", async (req, res) => {
   }
 });
 
+// POST /orders/:id/lines/:sku/cancel-allocation - 할당리스트에서 라인 단위 할당취소
+router.post("/:id/lines/:sku/cancel-allocation", async (req, res) => {
+  const { id, sku } = req.params;
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    await client.query(
+      "UPDATE order_lines SET allocated_qty = 0, alloc_status = '미할당' WHERE order_id = $1 AND sku = $2",
+      [id, sku]
+    );
+    const linesRes = await client.query("SELECT allocated_qty FROM order_lines WHERE order_id = $1", [id]);
+    const anyAllocated = linesRes.rows.some((l) => l.allocated_qty > 0);
+    const orderRes = await client.query("SELECT status FROM orders WHERE id = $1", [id]);
+    if (orderRes.rows[0] && orderRes.rows[0].status === "ALLOCATED" && !anyAllocated) {
+      await client.query("UPDATE orders SET status = 'NEW' WHERE id = $1", [id]);
+    }
+    await client.query("COMMIT");
+    res.json({ ok: true });
+  } catch (e) {
+    await client.query("ROLLBACK");
+    res.status(400).json({ error: e.message });
+  } finally {
+    client.release();
+  }
+});
+
 // ---------- 3. 피킹 ----------
 
 // PATCH /orders/:id/lines/:sku/pick { picked }
