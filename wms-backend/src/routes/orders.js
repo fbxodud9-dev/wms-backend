@@ -54,18 +54,21 @@ router.post("/", async (req, res) => {
   try {
     await client.query("BEGIN");
     const finalOrderNo = orderNo || genOrderNo();
+    // 할당 단계 없이 등록과 동시에 100% 할당 완료 상태로 생성 (재고 체크 없음, 크로스도킹 정책)
     const oRes = await client.query(
       `INSERT INTO orders (order_no, customer, store_code, supplier, supplier_code, channel, status)
-       VALUES ($1,$2,$3,$4,$5,$6,'NEW') RETURNING *`,
+       VALUES ($1,$2,$3,$4,$5,$6,'ALLOCATED') RETURNING *`,
       [finalOrderNo, customer, storeCode || null, supplier || null, supplierCode || null, channel || null]
     );
     const order = oRes.rows[0];
     for (const l of lines) {
       if (!l.sku || !l.qty || l.qty <= 0) continue;
+      const itemRes = await client.query("SELECT location FROM items WHERE sku = $1", [l.sku]);
+      const location = itemRes.rows[0] ? itemRes.rows[0].location : l.location || "-";
       await client.query(
         `INSERT INTO order_lines (order_id, sku, name, qty, changed_qty, allocated_qty, alloc_status, location, unit, pack_qty, picked)
-         VALUES ($1,$2,$3,$4,$4,0,'미할당',$5,$6,$7,false)`,
-        [order.id, l.sku, l.name || l.sku, l.qty, l.location || "-", l.unit || "EA", l.packQty || 0]
+         VALUES ($1,$2,$3,$4,$4,$4,'할당',$5,$6,$7,false)`,
+        [order.id, l.sku, l.name || l.sku, l.qty, location, l.unit || "EA", l.packQty || 0]
       );
     }
     await client.query("COMMIT");
@@ -88,8 +91,11 @@ router.patch("/:id/lines/:sku", async (req, res) => {
   try {
     const oRes = await pool.query("SELECT status FROM orders WHERE id = $1", [id]);
     if (oRes.rows.length === 0) return res.status(404).json({ error: "발주를 찾을 수 없습니다." });
-    if (oRes.rows[0].status !== "NEW") return res.status(400).json({ error: "신규 상태의 발주만 수량을 수정할 수 있습니다." });
-    await pool.query("UPDATE order_lines SET changed_qty = $1 WHERE order_id = $2 AND sku = $3", [changedQty, id, sku]);
+    if (!["NEW", "ALLOCATED"].includes(oRes.rows[0].status)) {
+      return res.status(400).json({ error: "피킹이 시작되기 전(할당 상태)까지만 수량을 수정할 수 있습니다." });
+    }
+    // 할당 단계가 없으므로 수량 변경 시 할당수량도 함께 100%로 재계산
+    await pool.query("UPDATE order_lines SET changed_qty = $1, allocated_qty = $1, alloc_status = '할당' WHERE order_id = $2 AND sku = $3", [changedQty, id, sku]);
     res.json({ ok: true });
   } catch (e) {
     console.error(e);
