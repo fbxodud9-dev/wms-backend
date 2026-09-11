@@ -114,11 +114,11 @@ router.post("/convert-to-picking", async (req, res) => {
     for (const order of targets.rows) {
       const linesRes = await client.query("SELECT * FROM order_lines WHERE order_id = $1", [order.id]);
       for (const line of linesRes.rows) {
-        const itemRes = await client.query("SELECT qty, location FROM items WHERE sku = $1", [line.sku]);
-        const stock = itemRes.rows[0] ? itemRes.rows[0].qty : 0;
+        const itemRes = await client.query("SELECT location FROM items WHERE sku = $1", [line.sku]);
         const location = itemRes.rows[0] ? itemRes.rows[0].location : line.location;
-        const allocatedQty = Math.max(0, Math.min(line.changed_qty, stock));
-        const allocStatus = allocatedQty === 0 ? "미할당" : allocatedQty < line.changed_qty ? "부분할당" : "할당";
+        // 재고 체크 없이 요청수량을 그대로 100% 할당 (크로스도킹: 당일 입고 후 바로 출고되는 품목이 많음)
+        const allocatedQty = line.changed_qty;
+        const allocStatus = "할당";
         await client.query("UPDATE order_lines SET allocated_qty = $1, alloc_status = $2, location = $3 WHERE id = $4", [allocatedQty, allocStatus, location, line.id]);
       }
       await client.query("UPDATE orders SET status = 'ALLOCATED' WHERE id = $1", [order.id]);
@@ -144,11 +144,10 @@ router.post("/:id/allocate", async (req, res) => {
     const linesRes = await client.query("SELECT * FROM order_lines WHERE order_id = $1", [id]);
     if (linesRes.rows.length === 0) throw new Error("발주를 찾을 수 없습니다.");
     for (const line of linesRes.rows) {
-      const itemRes = await client.query("SELECT qty, location FROM items WHERE sku = $1", [line.sku]);
-      const stock = itemRes.rows[0] ? itemRes.rows[0].qty : 0;
+      const itemRes = await client.query("SELECT location FROM items WHERE sku = $1", [line.sku]);
       const location = itemRes.rows[0] ? itemRes.rows[0].location : line.location;
-      const allocatedQty = Math.max(0, Math.min(line.changed_qty, stock));
-      const allocStatus = allocatedQty === 0 ? "미할당" : allocatedQty < line.changed_qty ? "부분할당" : "할당";
+      const allocatedQty = line.changed_qty;
+      const allocStatus = "할당";
       await client.query("UPDATE order_lines SET allocated_qty = $1, alloc_status = $2, location = $3 WHERE id = $4", [allocatedQty, allocStatus, location, line.id]);
     }
     await client.query("UPDATE orders SET status = 'ALLOCATED' WHERE id = $1", [id]);
@@ -298,10 +297,7 @@ router.post("/:id/ship", async (req, res) => {
 
     for (const line of order.lines) {
       if (line.allocated_qty <= 0) continue;
-      const itemRes = await client.query("SELECT qty FROM items WHERE sku = $1 FOR UPDATE", [line.sku]);
-      if (itemRes.rows.length === 0 || itemRes.rows[0].qty < line.allocated_qty) {
-        throw new Error(`${line.name}(${line.sku}) 재고가 부족하여 출고할 수 없습니다.`);
-      }
+      // 재고 부족(또는 0)이어도 출고를 막지 않음 — 당일 입고 후 바로 출고되는 크로스도킹 품목이 많음
       await client.query("UPDATE items SET qty = qty - $1, updated_at = now() WHERE sku = $2", [line.allocated_qty, line.sku]);
       await client.query(
         `INSERT INTO transactions (type, sku, name, qty, location, memo) VALUES ('OUT', $1, $2, $3, $4, $5)`,
