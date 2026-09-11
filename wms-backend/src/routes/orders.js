@@ -373,4 +373,23 @@ router.post("/:id/confirm-pms", async (req, res) => {
   }
 });
 
+// DELETE /orders/reset-all - 테스트 데이터 초기화 (모든 발주/라인/피킹지시서 삭제, 품목마스터/재고는 유지)
+router.delete("/reset-all", async (req, res) => {
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    await client.query("DELETE FROM picking_docs");
+    await client.query("DELETE FROM order_lines");
+    await client.query("DELETE FROM orders");
+    await client.query("COMMIT");
+    res.json({ ok: true });
+  } catch (e) {
+    await client.query("ROLLBACK");
+    console.error(e);
+    res.status(500).json({ error: "초기화 중 오류가 발생했습니다." });
+  } finally {
+    client.release();
+  }
+});
+
 module.exports = router;
