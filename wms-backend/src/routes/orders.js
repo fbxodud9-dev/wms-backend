@@ -114,11 +114,12 @@ router.post("/convert-to-picking", async (req, res) => {
     for (const order of targets.rows) {
       const linesRes = await client.query("SELECT * FROM order_lines WHERE order_id = $1", [order.id]);
       for (const line of linesRes.rows) {
-        const itemRes = await client.query("SELECT qty FROM items WHERE sku = $1", [line.sku]);
+        const itemRes = await client.query("SELECT qty, location FROM items WHERE sku = $1", [line.sku]);
         const stock = itemRes.rows[0] ? itemRes.rows[0].qty : 0;
+        const location = itemRes.rows[0] ? itemRes.rows[0].location : line.location;
         const allocatedQty = Math.max(0, Math.min(line.changed_qty, stock));
         const allocStatus = allocatedQty === 0 ? "미할당" : allocatedQty < line.changed_qty ? "부분할당" : "할당";
-        await client.query("UPDATE order_lines SET allocated_qty = $1, alloc_status = $2 WHERE id = $3", [allocatedQty, allocStatus, line.id]);
+        await client.query("UPDATE order_lines SET allocated_qty = $1, alloc_status = $2, location = $3 WHERE id = $4", [allocatedQty, allocStatus, location, line.id]);
       }
       await client.query("UPDATE orders SET status = 'ALLOCATED' WHERE id = $1", [order.id]);
       convertedIds.push(order.id);
@@ -143,11 +144,12 @@ router.post("/:id/allocate", async (req, res) => {
     const linesRes = await client.query("SELECT * FROM order_lines WHERE order_id = $1", [id]);
     if (linesRes.rows.length === 0) throw new Error("발주를 찾을 수 없습니다.");
     for (const line of linesRes.rows) {
-      const itemRes = await client.query("SELECT qty FROM items WHERE sku = $1", [line.sku]);
+      const itemRes = await client.query("SELECT qty, location FROM items WHERE sku = $1", [line.sku]);
       const stock = itemRes.rows[0] ? itemRes.rows[0].qty : 0;
+      const location = itemRes.rows[0] ? itemRes.rows[0].location : line.location;
       const allocatedQty = Math.max(0, Math.min(line.changed_qty, stock));
       const allocStatus = allocatedQty === 0 ? "미할당" : allocatedQty < line.changed_qty ? "부분할당" : "할당";
-      await client.query("UPDATE order_lines SET allocated_qty = $1, alloc_status = $2 WHERE id = $3", [allocatedQty, allocStatus, line.id]);
+      await client.query("UPDATE order_lines SET allocated_qty = $1, alloc_status = $2, location = $3 WHERE id = $4", [allocatedQty, allocStatus, location, line.id]);
     }
     await client.query("UPDATE orders SET status = 'ALLOCATED' WHERE id = $1", [id]);
     await client.query("COMMIT");
