@@ -114,4 +114,17 @@ router.post("/:sku/outbound", async (req, res) => {
   }
 });
 
+// DELETE /items/:sku - 품목 삭제 (시범/테스트 품목 정리용)
+router.delete("/:sku", async (req, res) => {
+  const { sku } = req.params;
+  try {
+    const { rows } = await pool.query("DELETE FROM items WHERE sku = $1 RETURNING sku", [sku]);
+    if (rows.length === 0) return res.status(404).json({ error: "해당 SKU를 찾을 수 없습니다." });
+    res.json({ ok: true });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: "품목 삭제 중 오류가 발생했습니다." });
+  }
+});
+
 module.exports = router;
