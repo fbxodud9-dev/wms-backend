@@ -83,7 +83,97 @@ router.post("/", async (req, res) => {
   }
 });
 
-// PATCH /orders/:id/lines/:sku - 변경단위수량 수정 (신규 상태에서만)
+// POST /orders/bulk - 여러 발주를 한 번의 요청/트랜잭션으로 등록 (엑셀 업로드처럼 대량 등록 시 사용)
+router.post("/bulk", async (req, res) => {
+  const { orders } = req.body || {};
+  if (!Array.isArray(orders) || orders.length === 0) {
+    return res.status(400).json({ error: "orders 배열이 필요합니다." });
+  }
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+
+    // 이번 요청에서 조회한 품목 위치는 캐싱해서 반복 조회를 줄임
+    const locationCache = new Map();
+    async function getLocation(sku, fallback) {
+      if (locationCache.has(sku)) return locationCache.get(sku);
+      const itemRes = await client.query("SELECT location FROM items WHERE sku = $1", [sku]);
+      const loc = itemRes.rows[0] ? itemRes.rows[0].location : fallback || "-";
+      locationCache.set(sku, loc);
+      return loc;
+    }
+
+    let createdCount = 0;
+    const skipped = [];
+    for (const o of orders) {
+      const { orderNo, customer, storeCode, supplier, supplierCode, channel, lines } = o || {};
+      if (!customer || !Array.isArray(lines) || lines.length === 0) continue;
+      const finalOrderNo = orderNo || genOrderNo();
+      let orderRow;
+      try {
+        const oRes = await client.query(
+          `INSERT INTO orders (order_no, customer, store_code, supplier, supplier_code, channel, status)
+           VALUES ($1,$2,$3,$4,$5,$6,'ALLOCATED') RETURNING *`,
+          [finalOrderNo, customer, storeCode || null, supplier || null, supplierCode || null, channel || null]
+        );
+        orderRow = oRes.rows[0];
+      } catch (e) {
+        // 발주번호 중복(unique 제약) 등은 건너뛰고 계속 진행
+        skipped.push(finalOrderNo);
+        continue;
+      }
+      for (const l of lines) {
+        if (!l.sku || !l.qty || l.qty <= 0) continue;
+        const location = await getLocation(l.sku, l.location);
+        await client.query(
+          `INSERT INTO order_lines (order_id, sku, name, qty, changed_qty, allocated_qty, alloc_status, location, unit, pack_qty, picked)
+           VALUES ($1,$2,$3,$4,$4,$4,'할당',$5,$6,$7,false)`,
+          [orderRow.id, l.sku, l.name || l.sku, l.qty, location, l.unit || "EA", l.packQty || 0]
+        );
+      }
+      createdCount++;
+    }
+
+    await client.query("COMMIT");
+    res.status(201).json({ createdCount, skippedCount: skipped.length, skippedOrderNos: skipped });
+  } catch (e) {
+    await client.query("ROLLBACK");
+    console.error(e);
+    res.status(500).json({ error: "발주 일괄 등록 중 오류가 발생했습니다." });
+  } finally {
+    client.release();
+  }
+});
+
+// POST /orders/bulk-register-items - 여러 미등록 품목을 한 번에 "미배정" 상태로 등록 (파일 업로드 시 사용)
+router.post("/bulk-register-items", async (req, res) => {
+  const { items } = req.body || {};
+  if (!Array.isArray(items) || items.length === 0) {
+    return res.status(400).json({ error: "items 배열이 필요합니다." });
+  }
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    for (const it of items) {
+      if (!it.sku) continue;
+      await client.query(
+        `INSERT INTO items (sku, name, category, location, unit, qty, safety, temp_zone, work_type, unit_qty, box_qty, cbm)
+         VALUES ($1,$2,NULL,'미배정','EA',0,0,'상온','피킹',1,1,0)
+         ON CONFLICT (sku) DO UPDATE SET name = EXCLUDED.name, updated_at = now()`,
+        [it.sku, it.name || it.sku]
+      );
+    }
+    await client.query("COMMIT");
+    res.json({ ok: true });
+  } catch (e) {
+    await client.query("ROLLBACK");
+    console.error(e);
+    res.status(500).json({ error: "품목 일괄 등록 중 오류가 발생했습니다." });
+  } finally {
+    client.release();
+  }
+});
+
 router.patch("/:id/lines/:sku", async (req, res) => {
   const { id, sku } = req.params;
   const { changedQty } = req.body || {};
