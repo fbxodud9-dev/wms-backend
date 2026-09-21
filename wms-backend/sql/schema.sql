@@ -29,6 +29,7 @@ CREATE TABLE IF NOT EXISTS items (
 
 CREATE TABLE IF NOT EXISTS orders (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  seq SERIAL,
   order_no TEXT UNIQUE NOT NULL,
   customer TEXT NOT NULL,
   store_code TEXT,
@@ -42,6 +43,9 @@ CREATE TABLE IF NOT EXISTS orders (
   created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   completed_at TIMESTAMPTZ
 );
+
+-- 기존에 이미 만들어진 DB라면 컬럼만 추가 (신규 설치는 위 CREATE TABLE에 이미 포함됨)
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS seq SERIAL;
 
 CREATE TABLE IF NOT EXISTS order_lines (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
