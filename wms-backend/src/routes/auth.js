@@ -21,7 +21,7 @@ router.post("/login", async (req, res) => {
     if (!ok) return res.status(401).json({ error: "아이디 또는 비밀번호가 올바르지 않습니다." });
 
     const payload = { id: user.id, username: user.username, name: user.name };
-    const token = jwt.sign(payload, process.env.JWT_SECRET, { expiresIn: "12h" });
+    const token = jwt.sign(payload, process.env.JWT_SECRET, { expiresIn: "7d" });
     res.json({ token, user: payload });
   } catch (e) {
     console.error(e);
