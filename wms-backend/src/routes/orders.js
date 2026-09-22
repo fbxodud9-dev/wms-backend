@@ -94,45 +94,91 @@ router.post("/bulk", async (req, res) => {
   try {
     await client.query("BEGIN");
 
-    // 이번 요청에서 조회한 품목 위치는 캐싱해서 반복 조회를 줄임
-    const locationCache = new Map();
-    async function getLocation(sku, fallback) {
-      if (locationCache.has(sku)) return locationCache.get(sku);
-      const itemRes = await client.query("SELECT location FROM items WHERE sku = $1", [sku]);
-      const loc = itemRes.rows[0] ? itemRes.rows[0].location : fallback || "-";
-      locationCache.set(sku, loc);
-      return loc;
+    const valid = orders.filter((o) => o && o.customer && Array.isArray(o.lines) && o.lines.length > 0);
+    if (valid.length === 0) {
+      await client.query("COMMIT");
+      return res.status(201).json({ createdCount: 0, skippedCount: 0, skippedOrderNos: [] });
+    }
+    const orderRows = valid.map((o) => ({
+      orderNo: o.orderNo || genOrderNo(),
+      orderDate: o.orderDate || null,
+      customer: o.customer,
+      storeCode: o.storeCode || null,
+      supplier: o.supplier || null,
+      supplierCode: o.supplierCode || null,
+      channel: o.channel || null,
+    }));
+
+    // 1) 필요한 모든 SKU의 현재 로케이션을 한 번의 쿼리로 조회 (건마다 조회하지 않음)
+    const allSkus = [...new Set(valid.flatMap((o) => o.lines.filter((l) => l.sku && l.qty > 0).map((l) => l.sku)))];
+    const locMap = new Map();
+    if (allSkus.length > 0) {
+      const itemsRes = await client.query("SELECT sku, location FROM items WHERE sku = ANY($1::text[])", [allSkus]);
+      itemsRes.rows.forEach((r) => locMap.set(r.sku, r.location));
     }
 
-    let createdCount = 0;
+    // 2) 발주(orders)를 여러 건씩 묶어서 multi-row INSERT (중복은 ON CONFLICT DO NOTHING으로 건너뜀)
+    //    RETURNING은 "이번에 실제로 새로 들어간 행"만 돌려주므로, 이미 존재하던 발주는 절대 여기 안 잡힘
+    const ORDER_CHUNK = 500;
+    const createdOrderIds = new Array(orderRows.length).fill(null);
     const skipped = [];
-    for (const o of orders) {
-      const { orderNo, orderDate, customer, storeCode, supplier, supplierCode, channel, lines } = o || {};
-      if (!customer || !Array.isArray(lines) || lines.length === 0) continue;
-      const finalOrderNo = orderNo || genOrderNo();
-      let orderRow;
-      try {
-        const oRes = await client.query(
-          `INSERT INTO orders (order_no, order_date, customer, store_code, supplier, supplier_code, channel, status)
-           VALUES ($1,COALESCE($2,CURRENT_DATE),$3,$4,$5,$6,$7,'ALLOCATED') RETURNING *`,
-          [finalOrderNo, orderDate || null, customer, storeCode || null, supplier || null, supplierCode || null, channel || null]
-        );
-        orderRow = oRes.rows[0];
-      } catch (e) {
-        // 발주번호+날짜 중복(unique 제약) 등은 건너뛰고 계속 진행
-        skipped.push(finalOrderNo);
-        continue;
-      }
-      for (const l of lines) {
-        if (!l.sku || !l.qty || l.qty <= 0) continue;
-        const location = await getLocation(l.sku, l.location);
-        await client.query(
-          `INSERT INTO order_lines (order_id, sku, name, qty, changed_qty, allocated_qty, alloc_status, location, unit, pack_qty, picked)
-           VALUES ($1,$2,$3,$4,$4,$4,'할당',$5,$6,$7,false)`,
-          [orderRow.id, l.sku, l.name || l.sku, l.qty, location, l.unit || "EA", l.packQty || 0]
-        );
-      }
-      createdCount++;
+    let createdCount = 0;
+    for (let start = 0; start < orderRows.length; start += ORDER_CHUNK) {
+      const chunk = orderRows.slice(start, start + ORDER_CHUNK);
+      const values = [];
+      const placeholders = chunk.map((o, i) => {
+        const b = i * 7;
+        values.push(o.orderNo, o.orderDate, o.customer, o.storeCode, o.supplier, o.supplierCode, o.channel);
+        return `($${b + 1},COALESCE($${b + 2}::date,CURRENT_DATE),$${b + 3},$${b + 4},$${b + 5},$${b + 6},$${b + 7},'ALLOCATED')`;
+      });
+      const insRes = await client.query(
+        `INSERT INTO orders (order_no, order_date, customer, store_code, supplier, supplier_code, channel, status)
+         VALUES ${placeholders.join(",")}
+         ON CONFLICT (order_no, order_date) DO NOTHING
+         RETURNING id, order_no`,
+        values
+      );
+      // ON CONFLICT DO NOTHING + RETURNING은 입력 순서를 유지한 채 "실제로 들어간 행"만 돌려줌.
+      // 같은 청크 안의 order_no는 서로 달라야 정상이므로, 포인터로 순서를 맞춰 정확히 매칭.
+      let ptr = 0;
+      chunk.forEach((o, iInChunk) => {
+        const globalIdx = start + iInChunk;
+        if (ptr < insRes.rows.length && insRes.rows[ptr].order_no === o.orderNo) {
+          createdOrderIds[globalIdx] = insRes.rows[ptr].id;
+          createdCount++;
+          ptr++;
+        } else {
+          skipped.push(o.orderNo); // 이미 같은 발주번호+날짜가 존재해 건너뜀
+        }
+      });
+    }
+
+    // 3) 라인(order_lines)을 여러 건씩 묶어서 multi-row INSERT
+    const allLines = [];
+    valid.forEach((o, i) => {
+      const orderId = createdOrderIds[i];
+      if (!orderId) return; // 중복으로 건너뛴 발주는 라인도 넣지 않음
+      o.lines.forEach((l) => {
+        if (!l.sku || !l.qty || l.qty <= 0) return;
+        const location = locMap.has(l.sku) ? locMap.get(l.sku) : l.location || "-";
+        allLines.push([orderId, l.sku, l.name || l.sku, l.qty, location, l.unit || "EA", l.packQty || 0]);
+      });
+    });
+
+    const LINE_CHUNK = 800;
+    for (let start = 0; start < allLines.length; start += LINE_CHUNK) {
+      const chunk = allLines.slice(start, start + LINE_CHUNK);
+      const values = [];
+      const placeholders = chunk.map((row, i) => {
+        const b = i * 7;
+        values.push(...row);
+        return `($${b + 1},$${b + 2},$${b + 3},$${b + 4},$${b + 4},$${b + 4},'할당',$${b + 5},$${b + 6},$${b + 7},false)`;
+      });
+      await client.query(
+        `INSERT INTO order_lines (order_id, sku, name, qty, changed_qty, allocated_qty, alloc_status, location, unit, pack_qty, picked)
+         VALUES ${placeholders.join(",")}`,
+        values
+      );
     }
 
     await client.query("COMMIT");
@@ -152,16 +198,24 @@ router.post("/bulk-register-items", async (req, res) => {
   if (!Array.isArray(items) || items.length === 0) {
     return res.status(400).json({ error: "items 배열이 필요합니다." });
   }
+  const rows = items.filter((it) => it && it.sku);
   const client = await pool.connect();
   try {
     await client.query("BEGIN");
-    for (const it of items) {
-      if (!it.sku) continue;
+    const CHUNK = 500;
+    for (let start = 0; start < rows.length; start += CHUNK) {
+      const chunk = rows.slice(start, start + CHUNK);
+      const values = [];
+      const placeholders = chunk.map((it, i) => {
+        const b = i * 2;
+        values.push(it.sku, it.name || it.sku);
+        return `($${b + 1},$${b + 2},NULL,'미배정','EA',0,0,'상온','피킹',1,1,0)`;
+      });
       await client.query(
         `INSERT INTO items (sku, name, category, location, unit, qty, safety, temp_zone, work_type, unit_qty, box_qty, cbm)
-         VALUES ($1,$2,NULL,'미배정','EA',0,0,'상온','피킹',1,1,0)
+         VALUES ${placeholders.join(",")}
          ON CONFLICT (sku) DO UPDATE SET name = EXCLUDED.name, updated_at = now()`,
-        [it.sku, it.name || it.sku]
+        values
       );
     }
     await client.query("COMMIT");
