@@ -30,7 +30,8 @@ CREATE TABLE IF NOT EXISTS items (
 CREATE TABLE IF NOT EXISTS orders (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   seq SERIAL,
-  order_no TEXT UNIQUE NOT NULL,
+  order_no TEXT NOT NULL,
+  order_date DATE NOT NULL DEFAULT CURRENT_DATE,
   customer TEXT NOT NULL,
   store_code TEXT,
   supplier TEXT,
@@ -41,11 +42,16 @@ CREATE TABLE IF NOT EXISTS orders (
   pms_status TEXT,
   invoice_issued BOOLEAN NOT NULL DEFAULT false,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-  completed_at TIMESTAMPTZ
+  completed_at TIMESTAMPTZ,
+  UNIQUE (order_no, order_date)
 );
 
--- 기존에 이미 만들어진 DB라면 컬럼만 추가 (신규 설치는 위 CREATE TABLE에 이미 포함됨)
+-- 기존에 이미 만들어진 DB라면 컬럼/제약조건만 추가 (신규 설치는 위 CREATE TABLE에 이미 포함됨)
 ALTER TABLE orders ADD COLUMN IF NOT EXISTS seq SERIAL;
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS order_date DATE NOT NULL DEFAULT CURRENT_DATE;
+ALTER TABLE orders DROP CONSTRAINT IF EXISTS orders_order_no_key;
+ALTER TABLE orders DROP CONSTRAINT IF EXISTS orders_order_no_order_date_key;
+ALTER TABLE orders ADD CONSTRAINT orders_order_no_order_date_key UNIQUE (order_no, order_date);
 
 CREATE TABLE IF NOT EXISTS order_lines (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
