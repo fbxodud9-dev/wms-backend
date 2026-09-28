@@ -94,3 +94,11 @@ CREATE TABLE IF NOT EXISTS picking_docs (
 CREATE INDEX IF NOT EXISTS idx_order_lines_order_id ON order_lines(order_id);
 CREATE INDEX IF NOT EXISTS idx_orders_status ON orders(status);
 CREATE INDEX IF NOT EXISTS idx_items_sku ON items(sku);
+
+-- 대시보드 일자별 물동량 (채널별 수기 입력값). volumes 라우트가 첫 요청 때 자동 생성하기도 함
+CREATE TABLE IF NOT EXISTS daily_volumes (
+  vol_date DATE PRIMARY KEY,
+  data JSONB NOT NULL DEFAULT '{}'::jsonb,
+  updated_by TEXT,
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
