@@ -102,3 +102,11 @@ CREATE TABLE IF NOT EXISTS daily_volumes (
   updated_by TEXT,
   updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+
+-- 화면 설정값(피킹지시서 공급사/상품 순서 등). settings 라우트가 첫 요청 때 자동 생성하기도 함
+CREATE TABLE IF NOT EXISTS app_settings (
+  setting_key TEXT PRIMARY KEY,
+  value JSONB NOT NULL DEFAULT '{}'::jsonb,
+  updated_by TEXT,
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
