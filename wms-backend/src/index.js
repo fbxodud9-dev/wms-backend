@@ -7,6 +7,7 @@ const itemRoutes = require("./routes/items");
 const orderRoutes = require("./routes/orders");
 const transactionRoutes = require("./routes/transactions");
 const volumeRoutes = require("./routes/volumes");
+const settingsRoutes = require("./routes/settings");
 
 const app = express();
 
@@ -37,6 +38,7 @@ app.use("/items", itemRoutes);
 app.use("/orders", orderRoutes);
 app.use("/transactions", transactionRoutes);
 app.use("/volumes", volumeRoutes);
+app.use("/settings", settingsRoutes);
 
 // 공통 에러 핸들러
 app.use((err, req, res, next) => {
