@@ -8,6 +8,7 @@ const orderRoutes = require("./routes/orders");
 const transactionRoutes = require("./routes/transactions");
 const volumeRoutes = require("./routes/volumes");
 const settingsRoutes = require("./routes/settings");
+const { startCleanupJob } = require("./jobs/cleanup");
 
 const app = express();
 
@@ -49,4 +50,5 @@ app.use((err, req, res, next) => {
 const PORT = process.env.PORT || 8080;
 app.listen(PORT, () => {
   console.log(`WMS 백엔드 서버가 포트 ${PORT}에서 실행 중입니다.`);
+  startCleanupJob(); // 14일 지난 발주 자동 삭제
 });
