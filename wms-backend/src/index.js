@@ -8,6 +8,7 @@ const orderRoutes = require("./routes/orders");
 const transactionRoutes = require("./routes/transactions");
 const volumeRoutes = require("./routes/volumes");
 const settingsRoutes = require("./routes/settings");
+const gsDailyRoutes = require("./routes/gsDaily");
 const { startCleanupJob } = require("./jobs/cleanup");
 
 const app = express();
@@ -40,6 +41,7 @@ app.use("/orders", orderRoutes);
 app.use("/transactions", transactionRoutes);
 app.use("/volumes", volumeRoutes);
 app.use("/settings", settingsRoutes);
+app.use("/gs-daily", gsDailyRoutes);
 
 // 공통 에러 핸들러
 app.use((err, req, res, next) => {
