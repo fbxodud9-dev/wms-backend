@@ -537,7 +537,7 @@ router.delete("/reset-all", async (req, res) => {
   }
 });
 
-// DELETE /orders/by-date/:date - 특정 날짜(YYYY-MM-DD)의 발주만 삭제 (다른 날짜는 유지, 테스트 데이터 정리용)
+// DELETE /orders/by-date/:date[?channel=EMART] - 특정 날짜(YYYY-MM-DD)의 발주만 삭제 (다른 날짜는 유지, 테스트 데이터 정리용)
 router.delete("/by-date/:date", async (req, res) => {
   const { date } = req.params;
   if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) {
@@ -546,7 +546,11 @@ router.delete("/by-date/:date", async (req, res) => {
   const client = await pool.connect();
   try {
     await client.query("BEGIN");
-    const result = await client.query("DELETE FROM orders WHERE order_date = $1", [date]);
+    // ?channel=EMART 이면 이마트 발주만, 아니면 이마트를 뺀 나머지(GS 등)만 지운다 - 같은 날짜라도 서로 영향 없게
+    const result =
+      req.query.channel === "EMART"
+        ? await client.query("DELETE FROM orders WHERE order_date = $1 AND channel = 'EMART'", [date])
+        : await client.query("DELETE FROM orders WHERE order_date = $1 AND (channel IS NULL OR channel <> 'EMART')", [date]);
     await client.query("COMMIT");
     res.json({ ok: true, deleted: result.rowCount });
   } catch (e) {
