@@ -1,6 +1,7 @@
 const express = require("express");
 const pool = require("../db");
 const { requireAuth } = require("../middleware/auth");
+const { ensureBrandColumn } = require("../brandColumn");
 
 const router = express.Router();
 router.use(requireAuth);
@@ -8,6 +9,7 @@ router.use(requireAuth);
 // GET /items - 전체 품목 조회
 router.get("/", async (req, res) => {
   try {
+    await ensureBrandColumn().catch(() => {});
     const { rows } = await pool.query("SELECT * FROM items ORDER BY sku");
     res.json({ items: rows });
   } catch (e) {
@@ -18,9 +20,10 @@ router.get("/", async (req, res) => {
 
 // POST /items - 신규 품목 등록 (입고 시 신규 품목이면 함께 생성)
 router.post("/", async (req, res) => {
-  const { sku, name, category, location, unit, qty, safety, temp_zone, work_type, unit_qty, box_qty, cbm } = req.body || {};
+  const { sku, name, category, location, unit, qty, safety, temp_zone, work_type, unit_qty, box_qty, cbm, brands } = req.body || {};
   if (!sku || !name) return res.status(400).json({ error: "상품코드와 품목명은 필수입니다." });
   try {
+    await ensureBrandColumn().catch(() => {});
     const { rows } = await pool.query(
       `INSERT INTO items (sku, name, category, location, unit, qty, safety, temp_zone, work_type, unit_qty, box_qty, cbm)
        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
@@ -28,7 +31,12 @@ router.post("/", async (req, res) => {
        RETURNING *`,
       [sku, name, category || null, location || null, unit || "EA", qty || 0, safety || 0, temp_zone || "상온", work_type || "피킹", unit_qty || 1, box_qty || 1, cbm || 0]
     );
-    res.status(201).json({ item: rows[0] });
+    let item = rows[0];
+    if (brands) {
+      const r2 = await pool.query("UPDATE items SET brands = $2 WHERE sku = $1 RETURNING *", [sku, String(brands)]);
+      if (r2.rows[0]) item = r2.rows[0];
+    }
+    res.status(201).json({ item });
   } catch (e) {
     console.error(e);
     res.status(500).json({ error: "품목 등록 중 오류가 발생했습니다." });
@@ -104,7 +112,8 @@ router.patch("/:sku", async (req, res) => {
       client.release();
     }
   }
-  const allowed = ["name", "category", "location", "unit", "qty", "safety", "temp_zone", "work_type", "unit_qty", "box_qty", "cbm"];
+  const allowed = ["name", "category", "location", "unit", "qty", "safety", "temp_zone", "work_type", "unit_qty", "box_qty", "cbm", "brands"];
+  if (fields.brands !== undefined) await ensureBrandColumn().catch(() => {});
   const sets = [];
   const values = [];
   let i = 1;

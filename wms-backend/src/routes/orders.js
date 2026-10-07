@@ -1,6 +1,7 @@
 const express = require("express");
 const pool = require("../db");
 const { requireAuth } = require("../middleware/auth");
+const { ensureBrandColumn, mergeBrands } = require("../brandColumn");
 
 const router = express.Router();
 router.use(requireAuth);
@@ -192,34 +193,70 @@ router.post("/bulk", async (req, res) => {
   }
 });
 
-// POST /orders/bulk-register-items - 여러 미등록 품목을 한 번에 "미배정" 상태로 등록 (파일 업로드 시 사용)
+// POST /orders/bulk-register-items - 발주파일 업로드 시 상품마스터에 자동 등록
+// items: [{ sku, name, brand?, boxQty? }]
+//  - 새 상품: "미배정" 상태로 등록 (brand 없으면 GS)
+//  - 이미 있는 상품 + brand 지정: 브랜드만 추가 (상품명/입수는 그대로)
+//  - 이미 있는 상품 + brand 없음: 예전처럼 상품명만 갱신
 router.post("/bulk-register-items", async (req, res) => {
   const { items } = req.body || {};
   if (!Array.isArray(items) || items.length === 0) {
     return res.status(400).json({ error: "items 배열이 필요합니다." });
   }
-  const rows = items.filter((it) => it && it.sku);
+  const seen = new Map();
+  items.forEach((it) => {
+    const sku = String((it && it.sku) || "").trim();
+    if (!sku) return;
+    seen.set(sku, {
+      sku,
+      name: String(it.name || sku).trim() || sku,
+      brand: String(it.brand || "").trim(),
+      boxQty: Math.max(0, Math.round(Number(it.boxQty) || 0)),
+    });
+  });
+  const rows = Array.from(seen.values());
+  if (rows.length === 0) return res.json({ ok: true, inserted: 0, updated: 0 });
+  try {
+    await ensureBrandColumn();
+  } catch (e) {
+    console.error(e);
+  }
   const client = await pool.connect();
   try {
     await client.query("BEGIN");
+    const existing = new Map();
     const CHUNK = 500;
     for (let start = 0; start < rows.length; start += CHUNK) {
       const chunk = rows.slice(start, start + CHUNK);
-      const values = [];
-      const placeholders = chunk.map((it, i) => {
-        const b = i * 2;
-        values.push(it.sku, it.name || it.sku);
-        return `($${b + 1},$${b + 2},NULL,'미배정','EA',0,0,'상온','피킹',1,1,0)`;
-      });
-      await client.query(
-        `INSERT INTO items (sku, name, category, location, unit, qty, safety, temp_zone, work_type, unit_qty, box_qty, cbm)
-         VALUES ${placeholders.join(",")}
-         ON CONFLICT (sku) DO UPDATE SET name = EXCLUDED.name, updated_at = now()`,
-        values
-      );
+      const ph = chunk.map((_, i) => `$${i + 1}`).join(",");
+      const r = await client.query(`SELECT sku, brands FROM items WHERE sku IN (${ph})`, chunk.map((x) => x.sku));
+      r.rows.forEach((x) => existing.set(x.sku, x.brands));
+    }
+    let inserted = 0;
+    let updated = 0;
+    for (const it of rows) {
+      if (existing.has(it.sku)) {
+        if (it.brand) {
+          const merged = mergeBrands(existing.get(it.sku), it.brand);
+          if (merged !== existing.get(it.sku)) {
+            await client.query("UPDATE items SET brands = $2, updated_at = now() WHERE sku = $1", [it.sku, merged]);
+            updated++;
+          }
+        } else {
+          await client.query("UPDATE items SET name = $2, updated_at = now() WHERE sku = $1", [it.sku, it.name]);
+          updated++;
+        }
+      } else {
+        await client.query(
+          `INSERT INTO items (sku, name, category, location, unit, qty, safety, temp_zone, work_type, unit_qty, box_qty, cbm, brands)
+           VALUES ($1,$2,NULL,'미배정','EA',0,0,'상온','피킹',1,$3,0,$4)`,
+          [it.sku, it.name, it.boxQty > 0 ? it.boxQty : 1, it.brand || "GS"]
+        );
+        inserted++;
+      }
     }
     await client.query("COMMIT");
-    res.json({ ok: true });
+    res.json({ ok: true, inserted, updated });
   } catch (e) {
     await client.query("ROLLBACK");
     console.error(e);
