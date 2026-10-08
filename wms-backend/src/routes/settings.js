@@ -29,6 +29,36 @@ function ensureTable() {
 
 const KEY_RE = /^[a-z0-9_]{1,40}$/;
 
+// GET /settings/sync/version - 화면 실시간 동기화용 "변경 표시" (가벼운 숫자만).
+// 다른 직원이 설정을 저장하거나 발주를 올리면/지우면/수정하면 값이 바뀌고, 화면은 바뀐 것만 다시 불러온다.
+router.get("/sync/version", async (req, res) => {
+  try {
+    await ensureTable();
+    const s = await pool.query("SELECT setting_key, updated_at FROM app_settings");
+    const settings = {};
+    s.rows.forEach((r) => (settings[r.setting_key] = new Date(r.updated_at).getTime()));
+    const one = async (sql) => {
+      try {
+        const r = await pool.query(sql);
+        return r.rows.map((x) => Object.values(x).map((v) => (v instanceof Date ? v.getTime() : String(v))).join(":")).join("|");
+      } catch (e) {
+        return "x";
+      }
+    };
+    const parts = await Promise.all([
+      one("SELECT COUNT(*) AS c, MAX(created_at) AS m FROM orders"),
+      one("SELECT status, COUNT(*) AS c FROM orders GROUP BY status ORDER BY status"),
+      one("SELECT COUNT(*) AS c, SUM(COALESCE(changed_qty, qty)) AS q FROM order_lines"),
+      one("SELECT picked, COUNT(*) AS c FROM order_lines GROUP BY picked ORDER BY picked"),
+      one("SELECT COUNT(*) AS c, MAX(updated_at) AS m FROM items"),
+    ]);
+    res.json({ settings, data: parts.join("#") });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: "동기화 정보를 불러오지 못했습니다." });
+  }
+});
+
 // GET /settings/:key - 저장된 값 (한 번도 저장한 적 없으면 value: null)
 router.get("/:key", async (req, res) => {
   const { key } = req.params;
