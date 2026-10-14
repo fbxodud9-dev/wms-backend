@@ -574,6 +574,20 @@ router.delete("/reset-all", async (req, res) => {
   }
 });
 
+// DELETE /orders/by-date/:date/channel/:channel - 그 날짜의 그 채널 발주만 삭제 (예: GSFROZEN = GS 냉동)
+router.delete("/by-date/:date/channel/:channel", async (req, res) => {
+  const { date, channel } = req.params;
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) return res.status(400).json({ error: "날짜 형식이 올바르지 않습니다 (YYYY-MM-DD)." });
+  if (!/^[A-Z_]{2,20}$/.test(channel)) return res.status(400).json({ error: "채널 이름이 올바르지 않습니다." });
+  try {
+    const result = await pool.query("DELETE FROM orders WHERE order_date = $1 AND channel = $2", [date, channel]);
+    res.json({ ok: true, deleted: result.rowCount });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: "해당 날짜 삭제 중 오류가 발생했습니다." });
+  }
+});
+
 // DELETE /orders/by-date/:date[?channel=EMART] - 특정 날짜(YYYY-MM-DD)의 발주만 삭제 (다른 날짜는 유지, 테스트 데이터 정리용)
 router.delete("/by-date/:date", async (req, res) => {
   const { date } = req.params;
@@ -583,11 +597,11 @@ router.delete("/by-date/:date", async (req, res) => {
   const client = await pool.connect();
   try {
     await client.query("BEGIN");
-    // ?channel=EMART 이면 이마트 발주만, 아니면 이마트를 뺀 나머지(GS 등)만 지운다 - 같은 날짜라도 서로 영향 없게
+    // ?channel=EMART 이면 이마트 발주만, 아니면 이마트·GS 냉동을 뺀 나머지(GS 일반)만 지운다 - 같은 날짜라도 서로 영향 없게
     const result =
       req.query.channel === "EMART"
         ? await client.query("DELETE FROM orders WHERE order_date = $1 AND channel = 'EMART'", [date])
-        : await client.query("DELETE FROM orders WHERE order_date = $1 AND (channel IS NULL OR channel <> 'EMART')", [date]);
+        : await client.query("DELETE FROM orders WHERE order_date = $1 AND (channel IS NULL OR channel NOT IN ('EMART', 'GSFROZEN'))", [date]); // GS 냉동도 따로 지움
     await client.query("COMMIT");
     res.json({ ok: true, deleted: result.rowCount });
   } catch (e) {
