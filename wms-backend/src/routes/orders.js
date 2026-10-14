@@ -597,11 +597,11 @@ router.delete("/by-date/:date", async (req, res) => {
   const client = await pool.connect();
   try {
     await client.query("BEGIN");
-    // ?channel=EMART 이면 이마트 발주만, 아니면 이마트·GS 냉동을 뺀 나머지(GS 일반)만 지운다 - 같은 날짜라도 서로 영향 없게
+    // ?channel=EMART 이면 이마트 발주만, 아니면 이마트·GS 냉동·이마트 냉동을 뺀 나머지(GS 일반)만 지운다 - 같은 날짜라도 서로 영향 없게
     const result =
       req.query.channel === "EMART"
         ? await client.query("DELETE FROM orders WHERE order_date = $1 AND channel = 'EMART'", [date])
-        : await client.query("DELETE FROM orders WHERE order_date = $1 AND (channel IS NULL OR channel NOT IN ('EMART', 'GSFROZEN'))", [date]); // GS 냉동도 따로 지움
+        : await client.query("DELETE FROM orders WHERE order_date = $1 AND (channel IS NULL OR channel NOT IN ('EMART', 'GSFROZEN', 'EMARTFROZEN'))", [date]); // GS 냉동도 따로 지움
     await client.query("COMMIT");
     res.json({ ok: true, deleted: result.rowCount });
   } catch (e) {
