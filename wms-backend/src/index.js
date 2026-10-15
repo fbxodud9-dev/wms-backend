@@ -8,6 +8,8 @@ const orderRoutes = require("./routes/orders");
 const transactionRoutes = require("./routes/transactions");
 const volumeRoutes = require("./routes/volumes");
 const settingsRoutes = require("./routes/settings");
+const gsDailyRoutes = require("./routes/gsDaily");
+const { startCleanupJob } = require("./jobs/cleanup");
 
 const app = express();
 
@@ -39,6 +41,7 @@ app.use("/orders", orderRoutes);
 app.use("/transactions", transactionRoutes);
 app.use("/volumes", volumeRoutes);
 app.use("/settings", settingsRoutes);
+app.use("/gs-daily", gsDailyRoutes);
 
 // 공통 에러 핸들러
 app.use((err, req, res, next) => {
@@ -82,4 +85,5 @@ bootDb().catch((e) => console.error("서버 시작 작업 실패:", e.message));
 const PORT = process.env.PORT || 8080;
 app.listen(PORT, () => {
   console.log(`WMS 백엔드 서버가 포트 ${PORT}에서 실행 중입니다.`);
+  startCleanupJob(); // 14일 지난 발주 자동 삭제
 });
