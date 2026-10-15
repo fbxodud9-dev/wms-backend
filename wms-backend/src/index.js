@@ -8,8 +8,6 @@ const orderRoutes = require("./routes/orders");
 const transactionRoutes = require("./routes/transactions");
 const volumeRoutes = require("./routes/volumes");
 const settingsRoutes = require("./routes/settings");
-const gsDailyRoutes = require("./routes/gsDaily");
-const { startCleanupJob } = require("./jobs/cleanup");
 
 const app = express();
 
@@ -41,7 +39,6 @@ app.use("/orders", orderRoutes);
 app.use("/transactions", transactionRoutes);
 app.use("/volumes", volumeRoutes);
 app.use("/settings", settingsRoutes);
-app.use("/gs-daily", gsDailyRoutes);
 
 // 공통 에러 핸들러
 app.use((err, req, res, next) => {
@@ -49,8 +46,12 @@ app.use((err, req, res, next) => {
   res.status(500).json({ error: err.message || "서버 오류가 발생했습니다." });
 });
 
+// 서버 켤 때 필요한 칸 자동 추가 (여러 번 실행해도 안전) - 2026-10-15 냉동 피킹지 납품일자
+require("./db")
+  .query("ALTER TABLE orders ADD COLUMN IF NOT EXISTS delivery_date DATE")
+  .catch((e) => console.error("delivery_date 칸 추가 실패:", e.message));
+
 const PORT = process.env.PORT || 8080;
 app.listen(PORT, () => {
   console.log(`WMS 백엔드 서버가 포트 ${PORT}에서 실행 중입니다.`);
-  startCleanupJob(); // 14일 지난 발주 자동 삭제
 });

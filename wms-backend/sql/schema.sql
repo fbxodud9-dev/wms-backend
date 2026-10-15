@@ -52,6 +52,8 @@ ALTER TABLE orders ADD COLUMN IF NOT EXISTS order_date DATE NOT NULL DEFAULT CUR
 ALTER TABLE orders DROP CONSTRAINT IF EXISTS orders_order_no_key;
 ALTER TABLE orders DROP CONSTRAINT IF EXISTS orders_order_no_order_date_key;
 ALTER TABLE orders ADD CONSTRAINT orders_order_no_order_date_key UNIQUE (order_no, order_date);
+-- 발주파일의 납품일자 (냉동 피킹지 "○/○ 납품" 표시용, 없으면 비어 있음)
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS delivery_date DATE;
 
 CREATE TABLE IF NOT EXISTS order_lines (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),

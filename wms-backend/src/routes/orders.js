@@ -47,7 +47,7 @@ router.get("/", async (req, res) => {
 // POST /orders - 발주 등록 (엑셀 업로드 파싱 결과 또는 수동 입력을 그대로 받음)
 // body: { orderNo?, customer, storeCode?, supplier?, supplierCode?, channel?, lines: [{sku, name, qty, packQty, location, unit}] }
 router.post("/", async (req, res) => {
-  const { orderNo, orderDate, customer, storeCode, supplier, supplierCode, channel, lines } = req.body || {};
+  const { orderNo, orderDate, deliveryDate, customer, storeCode, supplier, supplierCode, channel, lines } = req.body || {};
   if (!customer || !Array.isArray(lines) || lines.length === 0) {
     return res.status(400).json({ error: "발주처(customer)와 최소 1개 이상의 품목 라인이 필요합니다." });
   }
@@ -58,9 +58,9 @@ router.post("/", async (req, res) => {
     // 할당 단계 없이 등록과 동시에 100% 할당 완료 상태로 생성 (재고 체크 없음, 크로스도킹 정책)
     // 발주번호는 "날짜별로" 유일하면 됨 (같은 번호가 다른 날짜 파일에 다시 나와도 정상 등록됨)
     const oRes = await client.query(
-      `INSERT INTO orders (order_no, order_date, customer, store_code, supplier, supplier_code, channel, status)
-       VALUES ($1,COALESCE($2,CURRENT_DATE),$3,$4,$5,$6,$7,'ALLOCATED') RETURNING *`,
-      [finalOrderNo, orderDate || null, customer, storeCode || null, supplier || null, supplierCode || null, channel || null]
+      `INSERT INTO orders (order_no, order_date, customer, store_code, supplier, supplier_code, channel, status, delivery_date)
+       VALUES ($1,COALESCE($2,CURRENT_DATE),$3,$4,$5,$6,$7,'ALLOCATED',$8::date) RETURNING *`,
+      [finalOrderNo, orderDate || null, customer, storeCode || null, supplier || null, supplierCode || null, channel || null, deliveryDate || null]
     );
     const order = oRes.rows[0];
     for (const l of lines) {
@@ -103,6 +103,7 @@ router.post("/bulk", async (req, res) => {
     const orderRows = valid.map((o) => ({
       orderNo: o.orderNo || genOrderNo(),
       orderDate: o.orderDate || null,
+      deliveryDate: /^\d{4}-\d{2}-\d{2}$/.test(String(o.deliveryDate || "")) ? o.deliveryDate : null,
       customer: o.customer,
       storeCode: o.storeCode || null,
       supplier: o.supplier || null,
@@ -128,12 +129,12 @@ router.post("/bulk", async (req, res) => {
       const chunk = orderRows.slice(start, start + ORDER_CHUNK);
       const values = [];
       const placeholders = chunk.map((o, i) => {
-        const b = i * 7;
-        values.push(o.orderNo, o.orderDate, o.customer, o.storeCode, o.supplier, o.supplierCode, o.channel);
-        return `($${b + 1},COALESCE($${b + 2}::date,CURRENT_DATE),$${b + 3},$${b + 4},$${b + 5},$${b + 6},$${b + 7},'ALLOCATED')`;
+        const b = i * 8;
+        values.push(o.orderNo, o.orderDate, o.customer, o.storeCode, o.supplier, o.supplierCode, o.channel, o.deliveryDate);
+        return `($${b + 1},COALESCE($${b + 2}::date,CURRENT_DATE),$${b + 3},$${b + 4},$${b + 5},$${b + 6},$${b + 7},'ALLOCATED',$${b + 8}::date)`;
       });
       const insRes = await client.query(
-        `INSERT INTO orders (order_no, order_date, customer, store_code, supplier, supplier_code, channel, status)
+        `INSERT INTO orders (order_no, order_date, customer, store_code, supplier, supplier_code, channel, status, delivery_date)
          VALUES ${placeholders.join(",")}
          ON CONFLICT (order_no, order_date) DO NOTHING
          RETURNING id, order_no`,
