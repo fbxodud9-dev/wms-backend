@@ -1,5 +1,6 @@
 require("dotenv").config();
 const express = require("express");
+const compression = require("compression");
 const cors = require("cors");
 
 const authRoutes = require("./routes/auth");
@@ -33,6 +34,8 @@ app.use(
     },
   })
 );
+// 응답 압축 (gzip): 발주 목록처럼 큰 응답을 1/5~1/10 크기로 줄여 보냄. 브라우저가 자동으로 풀어서 화면은 그대로
+app.use(compression({ threshold: 1024 }));
 app.use(express.json({ limit: "5mb" }));
 
 app.get("/", (req, res) => res.json({ ok: true, service: "wms-backend" }));
