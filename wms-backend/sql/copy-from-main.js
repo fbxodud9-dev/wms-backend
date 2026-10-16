@@ -19,7 +19,7 @@ types.setTypeParser(1082, (v) => v);
 types.setTypeParser(114, (v) => v);
 types.setTypeParser(3802, (v) => v);
 
-const TABLES = ["users", "items", "orders", "order_lines", "transactions", "picking_docs", "daily_volumes", "app_settings", "gs_daily_totals"];
+const TABLES = ["users", "audit_logs", "items", "orders", "order_lines", "transactions", "picking_docs", "daily_volumes", "app_settings", "gs_daily_totals"];
 const ssl = process.env.DB_SSL === "true" ? { rejectUnauthorized: false } : false;
 
 async function main() {

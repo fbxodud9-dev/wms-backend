@@ -8,6 +8,26 @@ CREATE TABLE IF NOT EXISTS users (
   name TEXT NOT NULL,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+-- 직원 계정 권한 (2026-10-17): role = admin(관리자, 모든 권한) / staff(체크한 권한만)
+ALTER TABLE users ADD COLUMN IF NOT EXISTS role TEXT;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS perms JSONB NOT NULL DEFAULT '[]'::jsonb;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS active BOOLEAN NOT NULL DEFAULT true;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS must_change BOOLEAN NOT NULL DEFAULT false;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS last_login_at TIMESTAMPTZ;
+
+-- 작업 기록: 누가 언제 무엇을 (로그인·업로드·삭제·수량 수정·설정 변경·다운로드 등)
+CREATE TABLE IF NOT EXISTS audit_logs (
+  id BIGSERIAL PRIMARY KEY,
+  at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  user_id UUID,
+  username TEXT,
+  name TEXT,
+  action TEXT NOT NULL,
+  target TEXT,
+  detail JSONB NOT NULL DEFAULT '{}'::jsonb,
+  ip TEXT
+);
+CREATE INDEX IF NOT EXISTS audit_logs_at_idx ON audit_logs (at DESC);
 
 CREATE TABLE IF NOT EXISTS items (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -54,6 +74,7 @@ ALTER TABLE orders DROP CONSTRAINT IF EXISTS orders_order_no_order_date_key;
 ALTER TABLE orders ADD CONSTRAINT orders_order_no_order_date_key UNIQUE (order_no, order_date);
 -- 발주파일의 납품일자 (냉동 피킹지 "○/○ 납품" 표시용, 없으면 비어 있음)
 ALTER TABLE orders ADD COLUMN IF NOT EXISTS delivery_date DATE;
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS created_by TEXT; -- 업로드한 사람 (2026-10-17)
 
 CREATE TABLE IF NOT EXISTS order_lines (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),

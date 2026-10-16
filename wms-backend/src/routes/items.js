@@ -1,6 +1,7 @@
 const express = require("express");
 const pool = require("../db");
-const { requireAuth } = require("../middleware/auth");
+const { requireAuth, requirePerm } = require("../middleware/auth");
+const { audit } = require("../accounts");
 const { ensureBrandColumn } = require("../brandColumn");
 
 const router = express.Router();
@@ -19,7 +20,7 @@ router.get("/", async (req, res) => {
 });
 
 // POST /items - 신규 품목 등록 (입고 시 신규 품목이면 함께 생성)
-router.post("/", async (req, res) => {
+router.post("/", requirePerm("upload", "edit"), async (req, res) => {
   const { sku, name, category, location, unit, qty, safety, temp_zone, work_type, unit_qty, box_qty, cbm, brands } = req.body || {};
   if (!sku || !name) return res.status(400).json({ error: "상품코드와 품목명은 필수입니다." });
   try {
@@ -58,7 +59,7 @@ async function rekeyItem(client, from, to) {
 }
 
 // POST /items/rekey { pairs: [{ from, to }] } - 발주파일의 상품코드로 상품마스터 코드를 일괄 교체
-router.post("/rekey", async (req, res) => {
+router.post("/rekey", requirePerm("upload", "edit"), async (req, res) => {
   const pairs = Array.isArray(req.body && req.body.pairs) ? req.body.pairs : [];
   const clean = pairs
     .map((p) => ({ from: String((p && p.from) || "").trim(), to: String((p && p.to) || "").trim() }))
@@ -84,7 +85,7 @@ router.post("/rekey", async (req, res) => {
 });
 
 // PATCH /items/:sku - 품목마스터 정보 수정 (온도구역/작업유형/로케이션/단위 등)
-router.patch("/:sku", async (req, res) => {
+router.patch("/:sku", requirePerm("edit"), async (req, res) => {
   let { sku } = req.params;
   const fields = req.body || {};
   // 상품코드 자체를 바꾸는 경우 (body.newSku)
@@ -142,7 +143,7 @@ router.patch("/:sku", async (req, res) => {
 });
 
 // POST /items/:sku/inbound { qty, memo, date, location }
-router.post("/:sku/inbound", async (req, res) => {
+router.post("/:sku/inbound", requirePerm("edit"), async (req, res) => {
   const { sku } = req.params;
   const { qty, memo, date, location } = req.body || {};
   if (!qty || qty <= 0) return res.status(400).json({ error: "입고 수량은 1 이상이어야 합니다." });
@@ -169,7 +170,7 @@ router.post("/:sku/inbound", async (req, res) => {
 });
 
 // POST /items/:sku/outbound { qty, memo, date }
-router.post("/:sku/outbound", async (req, res) => {
+router.post("/:sku/outbound", requirePerm("edit"), async (req, res) => {
   const { sku } = req.params;
   const { qty, memo, date } = req.body || {};
   if (!qty || qty <= 0) return res.status(400).json({ error: "출고 수량은 1 이상이어야 합니다." });
@@ -195,11 +196,12 @@ router.post("/:sku/outbound", async (req, res) => {
 });
 
 // DELETE /items/:sku - 품목 삭제 (시범/테스트 품목 정리용)
-router.delete("/:sku", async (req, res) => {
+router.delete("/:sku", requirePerm("delete"), async (req, res) => {
   const { sku } = req.params;
   try {
-    const { rows } = await pool.query("DELETE FROM items WHERE sku = $1 RETURNING sku", [sku]);
+    const { rows } = await pool.query("DELETE FROM items WHERE sku = $1 RETURNING sku, name", [sku]);
     if (rows.length === 0) return res.status(404).json({ error: "해당 상품코드를 찾을 수 없습니다." });
+    await audit(req, "item_delete", `${rows[0].name} (${sku})`, { sku });
     res.json({ ok: true });
   } catch (e) {
     console.error(e);

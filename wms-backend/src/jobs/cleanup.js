@@ -35,7 +35,20 @@ async function cleanupOldOrders() {
   }
 }
 
+// 작업 기록은 1년(AUDIT_RETENTION_DAYS)만 보관
+const AUDIT_RETENTION_DAYS = Math.max(30, parseInt(process.env.AUDIT_RETENTION_DAYS || "365", 10) || 365);
+async function cleanupOldAudit() {
+  try {
+    const r = await pool.query(`DELETE FROM audit_logs WHERE at < now() - ($1::int * interval '1 day')`, [AUDIT_RETENTION_DAYS]);
+    if (r.rowCount > 0) console.log(`[자동정리] ${AUDIT_RETENTION_DAYS}일 지난 작업 기록 ${r.rowCount}건 삭제`);
+  } catch (e) {
+    if (!/does not exist/.test(e.message)) console.error("[자동정리] 작업 기록 삭제 실패:", e.message);
+  }
+}
+
 function startCleanupJob() {
+  setTimeout(cleanupOldAudit, 20 * 1000);
+  setInterval(cleanupOldAudit, INTERVAL_MS);
   setTimeout(cleanupOldOrders, 10 * 1000); // 서버 시작 10초 뒤 첫 실행
   setInterval(cleanupOldOrders, INTERVAL_MS);
 }

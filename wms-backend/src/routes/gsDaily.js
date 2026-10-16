@@ -1,6 +1,6 @@
 const express = require("express");
 const pool = require("../db");
-const { requireAuth } = require("../middleware/auth");
+const { requireAuth, requirePerm } = require("../middleware/auth");
 
 const router = express.Router();
 router.use(requireAuth);
@@ -86,7 +86,7 @@ router.put("/:date", async (req, res) => {
 });
 
 // DELETE /gs-daily/:date - 그 날짜 스냅샷 삭제 (주문정보에서 "이 날짜 삭제"할 때 같이 지움)
-router.delete("/:date", async (req, res) => {
+router.delete("/:date", requirePerm("delete"), async (req, res) => {
   const { date } = req.params;
   if (!DATE_RE.test(date)) return res.status(400).json({ error: "날짜 형식이 올바르지 않습니다 (YYYY-MM-DD)." });
   try {

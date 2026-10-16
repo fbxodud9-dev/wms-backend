@@ -1,7 +1,8 @@
 const express = require("express");
 const pool = require("../db");
-const { requireAuth } = require("../middleware/auth");
+const { requireAuth, requirePerm } = require("../middleware/auth");
 const { ensureBrandColumn, mergeBrands } = require("../brandColumn");
+const { ensureAccounts, audit } = require("../accounts");
 
 const router = express.Router();
 router.use(requireAuth);
@@ -46,7 +47,7 @@ router.get("/", async (req, res) => {
 
 // POST /orders - 발주 등록 (엑셀 업로드 파싱 결과 또는 수동 입력을 그대로 받음)
 // body: { orderNo?, customer, storeCode?, supplier?, supplierCode?, channel?, lines: [{sku, name, qty, packQty, location, unit}] }
-router.post("/", async (req, res) => {
+router.post("/", requirePerm("upload"), async (req, res) => {
   const { orderNo, orderDate, deliveryDate, customer, storeCode, supplier, supplierCode, channel, lines } = req.body || {};
   if (!customer || !Array.isArray(lines) || lines.length === 0) {
     return res.status(400).json({ error: "발주처(customer)와 최소 1개 이상의 품목 라인이 필요합니다." });
@@ -86,8 +87,11 @@ router.post("/", async (req, res) => {
 });
 
 // POST /orders/bulk - 여러 발주를 한 번의 요청/트랜잭션으로 등록 (엑셀 업로드처럼 대량 등록 시 사용)
-router.post("/bulk", async (req, res) => {
+router.post("/bulk", requirePerm("upload"), async (req, res) => {
   const { orders } = req.body || {};
+  const meta = (req.body && req.body.meta && typeof req.body.meta === "object" && req.body.meta) || {}; // 화면이 보내는 업로드 정보 (파일 이름·페이지)
+  await ensureAccounts().catch(() => {});
+  const uploader = (req.user && (req.user.name || req.user.username)) || null;
   if (!Array.isArray(orders) || orders.length === 0) {
     return res.status(400).json({ error: "orders 배열이 필요합니다." });
   }
@@ -129,12 +133,12 @@ router.post("/bulk", async (req, res) => {
       const chunk = orderRows.slice(start, start + ORDER_CHUNK);
       const values = [];
       const placeholders = chunk.map((o, i) => {
-        const b = i * 8;
-        values.push(o.orderNo, o.orderDate, o.customer, o.storeCode, o.supplier, o.supplierCode, o.channel, o.deliveryDate);
-        return `($${b + 1},COALESCE($${b + 2}::date,CURRENT_DATE),$${b + 3},$${b + 4},$${b + 5},$${b + 6},$${b + 7},'ALLOCATED',$${b + 8}::date)`;
+        const b = i * 9;
+        values.push(o.orderNo, o.orderDate, o.customer, o.storeCode, o.supplier, o.supplierCode, o.channel, o.deliveryDate, uploader);
+        return `($${b + 1},COALESCE($${b + 2}::date,CURRENT_DATE),$${b + 3},$${b + 4},$${b + 5},$${b + 6},$${b + 7},'ALLOCATED',$${b + 8}::date,$${b + 9})`;
       });
       const insRes = await client.query(
-        `INSERT INTO orders (order_no, order_date, customer, store_code, supplier, supplier_code, channel, status, delivery_date)
+        `INSERT INTO orders (order_no, order_date, customer, store_code, supplier, supplier_code, channel, status, delivery_date, created_by)
          VALUES ${placeholders.join(",")}
          ON CONFLICT (order_no, order_date) DO NOTHING
          RETURNING id, order_no`,
@@ -184,6 +188,23 @@ router.post("/bulk", async (req, res) => {
     }
 
     await client.query("COMMIT");
+    // 작업 기록: 누가 어떤 파일을 올렸는지 (날짜·채널·건수·수량)
+    {
+      const dates = Array.from(new Set(orderRows.map((o) => o.orderDate).filter(Boolean))).sort();
+      const channels = Array.from(new Set(orderRows.map((o) => o.channel || "GS")));
+      const qty = allLines.reduce((a, l) => a + (Number(l[3]) || 0), 0);
+      await audit(req, "upload", (Array.isArray(meta.files) ? meta.files.join(", ") : "") || dates.join(", "), {
+        files: Array.isArray(meta.files) ? meta.files.slice(0, 30) : [],
+        page: meta.page || null,
+        dates,
+        channels,
+        created: createdCount,
+        skipped: skipped.length,
+        lines: allLines.length,
+        qty,
+        notes: meta.notes || null,
+      });
+    }
     res.status(201).json({ createdCount, skippedCount: skipped.length, skippedOrderNos: skipped });
   } catch (e) {
     await client.query("ROLLBACK");
@@ -199,7 +220,7 @@ router.post("/bulk", async (req, res) => {
 //  - 새 상품: "미배정" 상태로 등록 (brand 없으면 GS)
 //  - 이미 있는 상품 + brand 지정: 브랜드만 추가 (상품명/입수는 그대로)
 //  - 이미 있는 상품 + brand 없음: 예전처럼 상품명만 갱신
-router.post("/bulk-register-items", async (req, res) => {
+router.post("/bulk-register-items", requirePerm("upload", "edit"), async (req, res) => {
   const { items } = req.body || {};
   if (!Array.isArray(items) || items.length === 0) {
     return res.status(400).json({ error: "items 배열이 필요합니다." });
@@ -267,18 +288,22 @@ router.post("/bulk-register-items", async (req, res) => {
   }
 });
 
-router.patch("/:id/lines/:sku", async (req, res) => {
+router.patch("/:id/lines/:sku", requirePerm("edit"), async (req, res) => {
   const { id, sku } = req.params;
   const { changedQty } = req.body || {};
   if (changedQty == null || changedQty < 0) return res.status(400).json({ error: "올바른 수량을 입력해주세요." });
   try {
-    const oRes = await pool.query("SELECT status FROM orders WHERE id = $1", [id]);
+    const oRes = await pool.query("SELECT status, order_no, order_date, customer, supplier FROM orders WHERE id = $1", [id]);
     if (oRes.rows.length === 0) return res.status(404).json({ error: "발주를 찾을 수 없습니다." });
     if (!["NEW", "ALLOCATED"].includes(oRes.rows[0].status)) {
       return res.status(400).json({ error: "피킹이 시작되기 전(할당 상태)까지만 수량을 수정할 수 있습니다." });
     }
     // 할당 단계가 없으므로 수량 변경 시 할당수량도 함께 100%로 재계산
+    const before = await pool.query("SELECT name, qty, changed_qty FROM order_lines WHERE order_id = $1 AND sku = $2", [id, sku]);
     await pool.query("UPDATE order_lines SET changed_qty = $1, allocated_qty = $1, alloc_status = '할당' WHERE order_id = $2 AND sku = $3", [changedQty, id, sku]);
+    const o = oRes.rows[0];
+    const l = before.rows[0] || {};
+    await audit(req, "qty_edit", `${l.name || sku} · ${o.customer}`, { orderNo: o.order_no, date: o.order_date, supplier: o.supplier, sku, from: l.changed_qty ?? l.qty, to: changedQty, original: l.qty });
     res.json({ ok: true });
   } catch (e) {
     console.error(e);
@@ -557,14 +582,15 @@ router.post("/:id/confirm-pms", async (req, res) => {
 });
 
 // DELETE /orders/reset-all - 테스트 데이터 초기화 (모든 발주/라인/피킹지시서 삭제, 품목마스터/재고는 유지)
-router.delete("/reset-all", async (req, res) => {
+router.delete("/reset-all", requirePerm("delete"), async (req, res) => {
   const client = await pool.connect();
   try {
     await client.query("BEGIN");
     await client.query("DELETE FROM picking_docs");
     await client.query("DELETE FROM order_lines");
-    await client.query("DELETE FROM orders");
+    const r = await client.query("DELETE FROM orders");
     await client.query("COMMIT");
+    await audit(req, "delete_all", "전체 발주", { deleted: r.rowCount });
     res.json({ ok: true });
   } catch (e) {
     await client.query("ROLLBACK");
@@ -576,12 +602,13 @@ router.delete("/reset-all", async (req, res) => {
 });
 
 // DELETE /orders/by-date/:date/channel/:channel - 그 날짜의 그 채널 발주만 삭제 (예: GSFROZEN = GS 냉동)
-router.delete("/by-date/:date/channel/:channel", async (req, res) => {
+router.delete("/by-date/:date/channel/:channel", requirePerm("delete"), async (req, res) => {
   const { date, channel } = req.params;
   if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) return res.status(400).json({ error: "날짜 형식이 올바르지 않습니다 (YYYY-MM-DD)." });
   if (!/^[A-Z_]{2,20}$/.test(channel)) return res.status(400).json({ error: "채널 이름이 올바르지 않습니다." });
   try {
     const result = await pool.query("DELETE FROM orders WHERE order_date = $1 AND channel = $2", [date, channel]);
+    await audit(req, "delete_date", `${date} ${channel}`, { date, channel, deleted: result.rowCount });
     res.json({ ok: true, deleted: result.rowCount });
   } catch (e) {
     console.error(e);
@@ -590,7 +617,7 @@ router.delete("/by-date/:date/channel/:channel", async (req, res) => {
 });
 
 // DELETE /orders/by-date/:date[?channel=EMART] - 특정 날짜(YYYY-MM-DD)의 발주만 삭제 (다른 날짜는 유지, 테스트 데이터 정리용)
-router.delete("/by-date/:date", async (req, res) => {
+router.delete("/by-date/:date", requirePerm("delete"), async (req, res) => {
   const { date } = req.params;
   if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) {
     return res.status(400).json({ error: "날짜 형식이 올바르지 않습니다 (YYYY-MM-DD)." });
@@ -604,6 +631,8 @@ router.delete("/by-date/:date", async (req, res) => {
         ? await client.query("DELETE FROM orders WHERE order_date = $1 AND channel = 'EMART'", [date])
         : await client.query("DELETE FROM orders WHERE order_date = $1 AND (channel IS NULL OR channel NOT IN ('EMART', 'GSFROZEN', 'EMARTFROZEN'))", [date]); // GS 냉동도 따로 지움
     await client.query("COMMIT");
+    const ch = req.query.channel === "EMART" ? "EMART" : "GS";
+    await audit(req, "delete_date", `${date} ${ch}`, { date, channel: ch, deleted: result.rowCount });
     res.json({ ok: true, deleted: result.rowCount });
   } catch (e) {
     await client.query("ROLLBACK");

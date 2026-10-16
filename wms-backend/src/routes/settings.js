@@ -1,6 +1,9 @@
 const express = require("express");
 const pool = require("../db");
 const { requireAuth } = require("../middleware/auth");
+const { audit } = require("../accounts");
+// 화면이 알아서 저장하는 기록(배운 업체코드·상품 연결·확인한 신제품 목록 등)은 작업 기록에 안 남김 (너무 많음)
+const QUIET_KEYS = /^(known_products_|emart_vendor_codes$|emart_product_alias$|wms_|daily_(gsfrozen|emfrozen|emart)_\d{6}$)/;
 
 const router = express.Router();
 router.use(requireAuth);
@@ -93,6 +96,7 @@ router.put("/:key", async (req, res) => {
        RETURNING value, updated_at`,
       [key, json, (req.user && (req.user.name || req.user.username)) || null]
     );
+    if (!QUIET_KEYS.test(key)) await audit(req, "settings", key, { size: json.length });
     res.json({ value: rows[0].value, updatedAt: rows[0].updated_at });
   } catch (e) {
     console.error(e);
