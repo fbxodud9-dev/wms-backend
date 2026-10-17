@@ -3,6 +3,7 @@ const pool = require("../db");
 const { requireAuth, requirePerm } = require("../middleware/auth");
 const { ensureBrandColumn, mergeBrands } = require("../brandColumn");
 const { ensureAccounts, audit } = require("../accounts");
+const { shared } = require("../ordersCache");
 
 const router = express.Router();
 router.use(requireAuth);
@@ -26,24 +27,45 @@ async function getOrderWithLines(client, orderId) {
 // GET /orders?status=NEW - 전체 발주 목록(라인 포함) 조회
 router.get("/", async (req, res) => {
   try {
-    const { status } = req.query;
-    const oRes = status
-      ? await pool.query("SELECT * FROM orders WHERE status = $1 ORDER BY created_at DESC", [status])
-      : await pool.query("SELECT * FROM orders ORDER BY created_at DESC");
-    const orders = oRes.rows;
-    if (orders.length === 0) return res.json({ orders: [] });
-    const ids = orders.map((o) => o.id);
-    const lRes = await pool.query("SELECT * FROM order_lines WHERE order_id = ANY($1::uuid[])", [ids]);
-    const linesByOrder = {};
-    lRes.rows.forEach((l) => {
-      (linesByOrder[l.order_id] = linesByOrder[l.order_id] || []).push(l);
-    });
-    res.json({ orders: orders.map((o) => ({ ...o, lines: linesByOrder[o.id] || [] })) });
+    const status = req.query.status ? String(req.query.status) : "";
+    const json = await shared(`orders:${status}`, () => loadOrdersJson(status));
+    res.type("application/json").send(json);
   } catch (e) {
     console.error(e);
     res.status(500).json({ error: "발주 목록 조회 중 오류가 발생했습니다." });
   }
 });
+
+// 발주 목록 JSON을 DB에서 바로 글자 하나로 만들어 받음 (서버에서 10만 개 객체를 만들지 않아 메모리를 크게 아낌)
+// 내용·순서는 예전과 같음: 발주 칸 전부 + lines(라인 칸 전부), 최근 올린 순
+async function loadOrdersJson(status) {
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN READ ONLY");
+    await client.query("SET LOCAL TIME ZONE 'UTC'"); // 시간 글자를 예전처럼 UTC 기준으로
+    const where = status ? "WHERE o.status = $1" : "";
+    const r = await client.query(
+      `SELECT COALESCE(json_agg(t.j ORDER BY t.created_at DESC), '[]'::json)::text AS orders
+         FROM (
+           SELECT o.created_at,
+                  to_jsonb(o) || jsonb_build_object('lines', COALESCE(l.lines, '[]'::jsonb)) AS j
+             FROM orders o
+             LEFT JOIN (
+               SELECT order_id, jsonb_agg(to_jsonb(x)) AS lines FROM order_lines x GROUP BY order_id
+             ) l ON l.order_id = o.id
+             ${where}
+         ) t`,
+      status ? [status] : []
+    );
+    await client.query("COMMIT");
+    return `{"orders":${r.rows[0].orders}}`;
+  } catch (e) {
+    await client.query("ROLLBACK").catch(() => {});
+    throw e;
+  } finally {
+    client.release();
+  }
+}
 
 // POST /orders - 발주 등록 (엑셀 업로드 파싱 결과 또는 수동 입력을 그대로 받음)
 // body: { orderNo?, customer, storeCode?, supplier?, supplierCode?, channel?, lines: [{sku, name, qty, packQty, location, unit}] }
