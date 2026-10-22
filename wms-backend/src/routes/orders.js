@@ -25,10 +25,26 @@ async function getOrderWithLines(client, orderId) {
 // ---------- 1. 발주정보 ----------
 
 // GET /orders?status=NEW - 전체 발주 목록(라인 포함) 조회
+// GET /orders - 발주 목록(라인 포함)
+//   ?recent=3          : 채널마다 가장 최근 발주일 3개(그 날짜들의 모든 채널 발주) - 화면이 처음 받는 양을 줄임 (2026-10-22)
+//   ?dates=2026-10-15,… : 그 날짜들의 발주 전부 (지난 날짜 불러오기)
+//   ?status=NEW        : 예전과 같음. 아무것도 없으면 전부 (예전 화면·보조 서버 호환)
+// 날짜 단위로는 항상 그날 "모든 채널"을 통째로 돌려줌 → 일별 집계 스냅샷이 일부만 보고 저장되는 일이 없음
+const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 router.get("/", async (req, res) => {
   try {
     const status = req.query.status ? String(req.query.status) : "";
-    const json = await shared(`orders:${status}`, () => loadOrdersJson(status));
+    const recent = Math.min(14, Math.max(0, parseInt(req.query.recent, 10) || 0));
+    const dates = String(req.query.dates || "")
+      .split(",")
+      .map((x) => x.trim())
+      .filter((x) => DATE_RE.test(x))
+      .slice(0, 31);
+    let filter = null;
+    if (dates.length) filter = { dates: [...new Set(dates)].sort() };
+    else if (recent) filter = { recent };
+    const key = `orders:${status}:${filter ? (filter.dates ? "d" + filter.dates.join(",") : "r" + filter.recent) : "all"}`;
+    const json = await shared(key, () => loadOrdersJson(status, filter));
     res.type("application/json").send(json);
   } catch (e) {
     console.error(e);
@@ -36,29 +52,94 @@ router.get("/", async (req, res) => {
   }
 });
 
+// GET /orders/dates - 서버에 남아 있는 발주 날짜 요약 (날짜 × 채널: 발주 건수·상품 줄·수량·올린 사람). 지난 날짜 불러오기 목록용, 가벼움
+router.get("/dates", async (req, res) => {
+  try {
+    const json = await shared("orders:dates", async () => {
+      const r = await pool.query(
+        `SELECT o.order_date::text AS date, COALESCE(o.channel, '') AS channel, COUNT(DISTINCT o.id)::int AS orders,
+                COUNT(l.id)::int AS lines, COALESCE(SUM(COALESCE(l.changed_qty, l.qty)), 0)::int AS qty,
+                COALESCE(array_remove(array_agg(DISTINCT o.created_by), NULL), '{}') AS uploaders
+           FROM orders o LEFT JOIN order_lines l ON l.order_id = o.id
+          GROUP BY o.order_date, COALESCE(o.channel, '')
+          ORDER BY o.order_date DESC, 2`
+      );
+      return JSON.stringify({ dates: r.rows });
+    });
+    res.type("application/json").send(json);
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: "발주 날짜 목록을 불러오지 못했습니다." });
+  }
+});
+
+// GET /orders/catalog - 서버에 남아 있는 발주(14일)에 나온 상품 목록 (채널·공급사·상품코드·상품명별 마지막 발주일·입수). 상품 정보 관리 화면용, 가벼움
+router.get("/catalog", async (req, res) => {
+  try {
+    const json = await shared("orders:catalog", async () => {
+      const r = await pool.query(
+        `SELECT COALESCE(o.channel, '') AS channel, COALESCE(o.supplier, '') AS supplier, l.sku, l.name,
+                MAX(o.order_date)::text AS date, MAX(l.pack_qty)::int AS pack,
+                ((COALESCE(o.store_code, '') || ' ' || COALESCE(o.customer, '')) ~* '(^|\\s)VV[0-9]' OR COALESCE(o.customer, '') ~ '지에스리테일|GS리테일') AS gs_center
+           FROM orders o JOIN order_lines l ON l.order_id = o.id
+          GROUP BY 1, 2, 3, 4, 7`
+      );
+      return JSON.stringify({ products: r.rows });
+    });
+    res.type("application/json").send(json);
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: "상품 목록을 불러오지 못했습니다." });
+  }
+});
+
 // 발주 목록 JSON을 DB에서 바로 글자 하나로 만들어 받음 (서버에서 10만 개 객체를 만들지 않아 메모리를 크게 아낌)
 // 내용·순서는 예전과 같음: 발주 칸 전부 + lines(라인 칸 전부), 최근 올린 순
-async function loadOrdersJson(status) {
+async function loadOrdersJson(status, filter) {
   const client = await pool.connect();
   try {
     await client.query("BEGIN READ ONLY");
     await client.query("SET LOCAL TIME ZONE 'UTC'"); // 시간 글자를 예전처럼 UTC 기준으로
-    const where = status ? "WHERE o.status = $1" : "";
+    const conds = [];
+    const params = [];
+    if (status) {
+      params.push(status);
+      conds.push(`o.status = $${params.length}`);
+    }
+    let windowDates = null;
+    if (filter && filter.dates) {
+      params.push(filter.dates);
+      conds.push(`o.order_date = ANY($${params.length}::date[])`);
+    } else if (filter && filter.recent) {
+      // 채널마다 최근 발주일 N개 → 그 날짜들 합치기
+      const w = await client.query(
+        `SELECT DISTINCT order_date::text AS d FROM (
+           SELECT order_date, DENSE_RANK() OVER (PARTITION BY ch ORDER BY order_date DESC) AS rk
+             FROM (SELECT DISTINCT COALESCE(channel, '') AS ch, order_date FROM orders) x
+         ) y WHERE rk <= $1 ORDER BY 1`,
+        [filter.recent]
+      );
+      windowDates = w.rows.map((r) => r.d);
+      params.push(windowDates);
+      conds.push(`o.order_date = ANY($${params.length}::date[])`);
+    }
+    const where = conds.length ? "WHERE " + conds.join(" AND ") : "";
     const r = await client.query(
       `SELECT COALESCE(json_agg(t.j ORDER BY t.created_at DESC), '[]'::json)::text AS orders
          FROM (
            SELECT o.created_at,
                   to_jsonb(o) || jsonb_build_object('lines', COALESCE(l.lines, '[]'::jsonb)) AS j
              FROM orders o
-             LEFT JOIN (
-               SELECT order_id, jsonb_agg(to_jsonb(x)) AS lines FROM order_lines x GROUP BY order_id
-             ) l ON l.order_id = o.id
+             LEFT JOIN LATERAL (
+               SELECT jsonb_agg(to_jsonb(x)) AS lines FROM order_lines x WHERE x.order_id = o.id
+             ) l ON true
              ${where}
          ) t`,
-      status ? [status] : []
+      params
     );
     await client.query("COMMIT");
-    return `{"orders":${r.rows[0].orders}}`;
+    const meta = filter ? `,"loadedDates":${JSON.stringify(windowDates || filter.dates)}` : "";
+    return `{"orders":${r.rows[0].orders}${meta}}`;
   } catch (e) {
     await client.query("ROLLBACK").catch(() => {});
     throw e;

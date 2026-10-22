@@ -89,6 +89,9 @@ async function bootDb() {
     }
   }
   await db.query("ALTER TABLE orders ADD COLUMN IF NOT EXISTS delivery_date DATE").catch((e) => console.error("delivery_date 칸 추가 실패:", e.message));
+  // 날짜로 발주를 찾는 일이 많아져서(최근 3일·지난 날짜 불러오기) 날짜 색인 (여러 번 실행해도 안전)
+  await db.query("CREATE INDEX IF NOT EXISTS idx_orders_order_date ON orders(order_date)").catch((e) => console.error("발주 날짜 색인 실패:", e.message));
+  await db.query("CREATE INDEX IF NOT EXISTS idx_order_lines_order_id ON order_lines(order_id)").catch((e) => console.error("라인 색인 실패:", e.message));
   // 3) 직원 계정·권한·작업 기록 칸/표 (2026-10-17) - 예전 계정은 관리자로
   await ensureAccounts().catch((e) => console.error("계정·작업 기록 준비 실패:", e.message));
 }
