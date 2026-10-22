@@ -26,11 +26,14 @@ async function getOrderWithLines(client, orderId) {
 
 // GET /orders?status=NEW - 전체 발주 목록(라인 포함) 조회
 // GET /orders - 발주 목록(라인 포함)
-//   ?recent=3          : 채널마다 가장 최근 발주일 3개(그 날짜들의 모든 채널 발주) - 화면이 처음 받는 양을 줄임 (2026-10-22)
+//   ?recent=2          : 화면 묶음(GS계열 / 이마트 / GS냉동 / 이마트냉동)마다 그 묶음의 최근 발주일 N개만 - 처음 받는 양을 줄임 (2026-10-22)
+//                        (묶음 안에서는 날짜 단위로 통째로 → 일별 집계 스냅샷이 일부만 보고 저장되는 일 없음)
 //   ?dates=2026-10-15,… : 그 날짜들의 발주 전부 (지난 날짜 불러오기)
 //   ?status=NEW        : 예전과 같음. 아무것도 없으면 전부 (예전 화면·보조 서버 호환)
 // 날짜 단위로는 항상 그날 "모든 채널"을 통째로 돌려줌 → 일별 집계 스냅샷이 일부만 보고 저장되는 일이 없음
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
+// 화면 묶음: 이마트·GS냉동·이마트냉동은 따로, 나머지(GS·GS슈퍼 등)는 "GS" 하나 (화면이 발주를 나눠 담는 방식과 같음)
+const GROUP_SQL = (col) => `(CASE WHEN ${col} IN ('EMART', 'GSFROZEN', 'EMARTFROZEN') THEN ${col} ELSE 'GS' END)`;
 router.get("/", async (req, res) => {
   try {
     const status = req.query.status ? String(req.query.status) : "";
@@ -107,21 +110,26 @@ async function loadOrdersJson(status, filter) {
       conds.push(`o.status = $${params.length}`);
     }
     let windowDates = null;
+    let windowByGroup = null;
     if (filter && filter.dates) {
       params.push(filter.dates);
       conds.push(`o.order_date = ANY($${params.length}::date[])`);
     } else if (filter && filter.recent) {
-      // 채널마다 최근 발주일 N개 → 그 날짜들 합치기
+      // 묶음마다 최근 발주일 N개 (묶음 = 화면에서 따로 쓰는 단위: 이마트·GS냉동·이마트냉동, 나머지는 GS계열 하나)
       const w = await client.query(
-        `SELECT DISTINCT order_date::text AS d FROM (
-           SELECT order_date, DENSE_RANK() OVER (PARTITION BY ch ORDER BY order_date DESC) AS rk
-             FROM (SELECT DISTINCT COALESCE(channel, '') AS ch, order_date FROM orders) x
-         ) y WHERE rk <= $1 ORDER BY 1`,
+        `SELECT grp, order_date::text AS d FROM (
+           SELECT grp, order_date, DENSE_RANK() OVER (PARTITION BY grp ORDER BY order_date DESC) AS rk
+             FROM (SELECT DISTINCT ${GROUP_SQL("channel")} AS grp, order_date FROM orders) x
+         ) y WHERE rk <= $1 ORDER BY 1, 2`,
         [filter.recent]
       );
-      windowDates = w.rows.map((r) => r.d);
+      windowByGroup = {};
+      w.rows.forEach((r) => (windowByGroup[r.grp] = windowByGroup[r.grp] || []).push(r.d));
+      windowDates = [...new Set(w.rows.map((r) => r.d))].sort();
       params.push(windowDates);
       conds.push(`o.order_date = ANY($${params.length}::date[])`);
+      params.push(w.rows.map((r) => `${r.grp}|${r.d}`));
+      conds.push(`(${GROUP_SQL("o.channel")} || '|' || o.order_date::text) = ANY($${params.length}::text[])`);
     }
     const where = conds.length ? "WHERE " + conds.join(" AND ") : "";
     const r = await client.query(
@@ -138,7 +146,7 @@ async function loadOrdersJson(status, filter) {
       params
     );
     await client.query("COMMIT");
-    const meta = filter ? `,"loadedDates":${JSON.stringify(windowDates || filter.dates)}` : "";
+    const meta = filter ? `,"loadedDates":${JSON.stringify(windowDates || filter.dates)}${windowByGroup ? `,"loadedByGroup":${JSON.stringify(windowByGroup)}` : ""}` : "";
     return `{"orders":${r.rows[0].orders}${meta}}`;
   } catch (e) {
     await client.query("ROLLBACK").catch(() => {});
