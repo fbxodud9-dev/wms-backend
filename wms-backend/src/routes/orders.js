@@ -33,7 +33,7 @@ async function getOrderWithLines(client, orderId) {
 // 날짜 단위로는 항상 그날 "모든 채널"을 통째로 돌려줌 → 일별 집계 스냅샷이 일부만 보고 저장되는 일이 없음
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 // 화면 묶음: 이마트·GS냉동·이마트냉동·세븐·세븐냉동은 따로, 나머지(GS·GS슈퍼 등)는 "GS" 하나 (화면이 발주를 나눠 담는 방식과 같음)
-const GROUP_SQL = (col) => `(CASE WHEN ${col} IN ('EMART', 'GSFROZEN', 'EMARTFROZEN', 'SEVEN', 'SEVENFROZEN') THEN ${col} ELSE 'GS' END)`;
+const GROUP_SQL = (col) => `(CASE WHEN ${col} IN ('EMART', 'GSFROZEN', 'EMARTFROZEN', 'SEVEN', 'SEVENFROZEN', 'BGF', 'BGFFROZEN') THEN ${col} ELSE 'GS' END)`;
 router.get("/", async (req, res) => {
   try {
     const status = req.query.status ? String(req.query.status) : "";
@@ -736,11 +736,11 @@ router.delete("/by-date/:date", requirePerm("delete"), async (req, res) => {
   const client = await pool.connect();
   try {
     await client.query("BEGIN");
-    // ?channel=EMART 이면 이마트 발주만, 아니면 이마트·GS 냉동·이마트 냉동·세븐을 뺀 나머지(GS 일반)만 지운다 - 같은 날짜라도 서로 영향 없게 (세븐은 /channel/SEVEN 으로)
+    // ?channel=EMART 이면 이마트 발주만, 아니면 이마트·GS 냉동·이마트 냉동·세븐·BGF를 뺀 나머지(GS 일반)만 지운다 - 같은 날짜라도 서로 영향 없게 (세븐·BGF는 /channel/… 으로)
     const result =
       req.query.channel === "EMART"
         ? await client.query("DELETE FROM orders WHERE order_date = $1 AND channel = 'EMART'", [date])
-        : await client.query("DELETE FROM orders WHERE order_date = $1 AND (channel IS NULL OR channel NOT IN ('EMART', 'GSFROZEN', 'EMARTFROZEN', 'SEVEN', 'SEVENFROZEN'))", [date]); // GS 냉동도 따로 지움
+        : await client.query("DELETE FROM orders WHERE order_date = $1 AND (channel IS NULL OR channel NOT IN ('EMART', 'GSFROZEN', 'EMARTFROZEN', 'SEVEN', 'SEVENFROZEN', 'BGF', 'BGFFROZEN'))", [date]); // GS 냉동도 따로 지움
     await client.query("COMMIT");
     const ch = req.query.channel === "EMART" ? "EMART" : "GS";
     await audit(req, "delete_date", `${date} ${ch}`, { date, channel: ch, deleted: result.rowCount });
