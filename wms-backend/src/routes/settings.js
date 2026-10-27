@@ -3,7 +3,7 @@ const pool = require("../db");
 const { requireAuth } = require("../middleware/auth");
 const { audit } = require("../accounts");
 // 화면이 알아서 저장하는 기록(배운 업체코드·상품 연결·확인한 신제품 목록 등)은 작업 기록에 안 남김 (너무 많음)
-const QUIET_KEYS = /^(known_products_|emart_vendor_codes$|emart_product_alias$|seven_product_alias$|sevenfrozen_product_alias$|bgf_product_alias$|bgffrozen_product_alias$|bgf_vendor_codes$|wms_|daily_(gsfrozen|emfrozen|emart|seven|sevenfrozen|bgf|bgffrozen)_\d{6}$)/;
+const QUIET_KEYS = /^(known_products_|emart_vendor_codes$|emart_product_alias$|seven_product_alias$|sevenfrozen_product_alias$|bgf_product_alias$|bgffrozen_product_alias$|bgf_vendor_codes$|wms_|daily_(gsfrozen|emfrozen|emart|seven|sevenfrozen|bgf|bgffrozen|emdeli)_\d{6}$|emdeli_raw_\d{8}$)/;
 
 const router = express.Router();
 router.use(requireAuth);
